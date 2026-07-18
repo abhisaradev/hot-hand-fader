@@ -170,6 +170,16 @@ MIN_RECENT_MPG = 15
 GAMES_FOR_PURE_CURRENT = 40
 GAMES_FOR_BLENDED = 20
 
+# ==============================================================================
+# WNBA-SPECIFIC FILTER CONSTANTS
+# WNBA season is 40 games (vs NBA 82); games are 40 min (vs NBA 48).
+# Do NOT change the NBA constants above.
+# ==============================================================================
+
+WNBA_MIN_RECENT_MPG        = 12   # role players often 10-20 MPG; starters 25-32
+WNBA_GAMES_FOR_PURE_CURRENT = 20  # enough for a reliable current-season avg mid-season
+WNBA_GAMES_FOR_BLENDED      = 10  # blend with prior season if 10-19 games played
+
 PREDICTIONS_FILE = "daily_predictions.csv"
 GRADED_FILE = "graded_predictions.csv"
 PERFORMANCE_FILE = "model_performance.csv"
@@ -369,6 +379,178 @@ def _get_nba_games_espn(date_str):
     return games
 
 
+def _get_wnba_games_espn(date_str):
+    """
+    Fetch WNBA games for date_str using ESPN's public WNBA scoreboard.
+
+    CommonTeamRoster and ScoreboardV3 are NBA-only endpoints — they return empty
+    data for WNBA team IDs. ESPN's WNBA scoreboard is the reliable alternative.
+    Returns game dicts with ESPN WNBA team IDs (used by _get_wnba_roster_espn).
+    """
+    date_compact = date_str.replace("-", "")
+    url = (
+        f"https://site.api.espn.com/apis/site/v2/sports/basketball"
+        f"/wnba/scoreboard?dates={date_compact}"
+    )
+    try:
+        result = subprocess.run(
+            ["curl", "-sk", "--max-time", "10", url],
+            capture_output=True, text=True
+        )
+        if result.returncode != 0:
+            return []
+        data = json.loads(result.stdout)
+    except Exception as e:
+        print(f"  ESPN WNBA scoreboard error: {str(e)[:80]}")
+        return []
+
+    games = []
+    for event in data.get("events", []):
+        status = event.get("status", {})
+        status_id = str(status.get("type", {}).get("id", "1"))
+        status_text = status.get("type", {}).get("detail", "Scheduled")
+        already_started = status_id in ("2", "3")
+
+        comps = event.get("competitions", [])
+        if not comps:
+            continue
+        competitors = comps[0].get("competitors", [])
+        if len(competitors) < 2:
+            continue
+
+        home_team_id = away_team_id = None
+        for c in competitors:
+            tid = c.get("team", {}).get("id")
+            if tid is None:
+                continue
+            if c.get("homeAway") == "home":
+                home_team_id = int(tid)
+            else:
+                away_team_id = int(tid)
+
+        if home_team_id is None or away_team_id is None:
+            continue
+
+        games.append({
+            "game_id":            event.get("id", ""),
+            "home_team_id":       home_team_id,
+            "away_team_id":       away_team_id,
+            "game_status":        status_text,
+            "game_is_predictable": not already_started,
+        })
+    return games
+
+
+def _get_wnba_roster_espn(espn_team_id):
+    """
+    Fetch a WNBA team's roster from ESPN.
+    Returns a DataFrame with PLAYER_NAME and PLAYER_ID (ESPN athlete IDs).
+    """
+    url = (
+        f"https://site.api.espn.com/apis/site/v2/sports/basketball"
+        f"/wnba/teams/{espn_team_id}/roster"
+    )
+    try:
+        result = subprocess.run(
+            ["curl", "-sk", "--max-time", "10", url],
+            capture_output=True, text=True
+        )
+        if result.returncode != 0:
+            return pd.DataFrame()
+        data = json.loads(result.stdout)
+    except Exception:
+        return pd.DataFrame()
+
+    rows = []
+    for athlete in data.get("athletes", []):
+        name = athlete.get("displayName", "")
+        pid  = athlete.get("id", "")
+        if name and pid:
+            rows.append({"PLAYER_NAME": name, "PLAYER_ID": int(pid)})
+    return pd.DataFrame(rows) if rows else pd.DataFrame()
+
+
+def _get_wnba_player_gamelog_espn(espn_athlete_id, season_year):
+    """
+    Fetch a WNBA player's game log from ESPN's public athlete gamelog API.
+
+    Returns a DataFrame with columns: GAME_DATE, PTS, REB, AST, FG3M, MIN, PRA
+    matching the schema of get_player_gamelog() so existing analysis code reuses it.
+    Returns None on any error or if the player has no logged games.
+
+    3PT stat comes as 'made-attempted' string (e.g. '3-7') — parses the made count.
+    MIN may be a number or 'MM:SS' string — both handled.
+    """
+    url = (
+        f"https://site.web.api.espn.com/apis/common/v3/sports/basketball"
+        f"/wnba/athletes/{espn_athlete_id}/gamelog"
+        f"?region=us&lang=en-US&season={season_year}"
+    )
+    try:
+        result = subprocess.run(
+            ["curl", "-sk", "--max-time", "10", url],
+            capture_output=True, text=True
+        )
+        if result.returncode != 0:
+            return None
+        data = json.loads(result.stdout)
+    except Exception:
+        return None
+
+    labels      = data.get("labels", [])
+    events_dict = data.get("events", {})
+
+    rows = []
+    for st in data.get("seasonTypes", []):
+        for cat in st.get("categories", []):
+            for ev in cat.get("events", []):
+                eid  = str(ev.get("eventId", ""))
+                stats = ev.get("stats", [])
+                if len(stats) != len(labels):
+                    continue
+                ev_info  = events_dict.get(eid, {})
+                date_str = ev_info.get("gameDate", "")
+                if not date_str:
+                    continue
+
+                raw = dict(zip(labels, stats))
+
+                # 3PT is 'made-attempted' string — extract made count
+                try:
+                    fg3m = float(str(raw.get("3PT", "0-0")).split("-")[0])
+                except (ValueError, IndexError):
+                    fg3m = 0.0
+
+                # MIN may be a float or 'MM:SS' string
+                try:
+                    min_raw = str(raw.get("MIN", "0"))
+                    if ":" in min_raw:
+                        parts = min_raw.split(":")
+                        minutes = float(parts[0]) + float(parts[1]) / 60
+                    else:
+                        minutes = float(min_raw)
+                except (ValueError, TypeError):
+                    minutes = 0.0
+
+                rows.append({
+                    "GAME_DATE": date_str,
+                    "PTS":       float(raw.get("PTS", 0) or 0),
+                    "REB":       float(raw.get("REB", 0) or 0),
+                    "AST":       float(raw.get("AST", 0) or 0),
+                    "FG3M":      fg3m,
+                    "MIN":       minutes,
+                })
+
+    if not rows:
+        return None
+
+    df = pd.DataFrame(rows)
+    df["GAME_DATE"] = pd.to_datetime(df["GAME_DATE"], utc=True).dt.tz_convert(None)
+    df["PRA"] = df["PTS"] + df["REB"] + df["AST"]
+    df = df.sort_values("GAME_DATE").reset_index(drop=True)
+    return df[["GAME_DATE", "PTS", "REB", "AST", "FG3M", "MIN", "PRA"]]
+
+
 def get_games_for_date(date_str, league_id):
     """
     Return all games for the given date and league, with a predictability flag.
@@ -392,7 +574,10 @@ def get_games_for_date(date_str, league_id):
     if league_id == NBA_LEAGUE_ID:
         return _get_nba_games_espn(date_str)
 
-    # WNBA: keep nba_api approach (ESPN WNBA scoreboard has different structure)
+    if league_id == WNBA_LEAGUE_ID:
+        return _get_wnba_games_espn(date_str)
+
+    # Other leagues: nba_api fallback (not currently used)
     try:
         scoreboard = scoreboardv3.ScoreboardV3(
             game_date=date_str,
@@ -661,6 +846,107 @@ def analyze_player(player_name, player_id, current_season, previous_season):
 
 
 # ==============================================================================
+# WNBA ANALYSIS — parallel to the NBA functions above but using ESPN data
+# CommonTeamRoster / PlayerGameLog are NBA-only; WNBA uses ESPN throughout.
+# ==============================================================================
+
+def get_player_baseline_wnba(espn_athlete_id, current_season_year, previous_season_year):
+    """
+    WNBA equivalent of get_player_baseline(), using ESPN game logs and WNBA thresholds.
+
+    WNBA season is 40 games (not 82), so the tier breakpoints are halved:
+      Full season (20+ games): current season only
+      Mid-season (10-19 games): blend current + previous 60/40
+      Early (<10 games): fall back to previous season
+    """
+    current_rs  = _get_wnba_player_gamelog_espn(espn_athlete_id, current_season_year)
+    previous_rs = _get_wnba_player_gamelog_espn(espn_athlete_id, previous_season_year)
+
+    current_games = len(current_rs) if current_rs is not None else 0
+
+    if current_games >= WNBA_GAMES_FOR_PURE_CURRENT:
+        return current_rs, f"current_only ({current_games}g)", current_games
+
+    if current_games >= WNBA_GAMES_FOR_BLENDED:
+        if previous_rs is not None and len(previous_rs) >= 10:
+            blended_df = pd.concat(
+                [current_rs] * 3 + [previous_rs] * 2, ignore_index=True
+            )
+            return blended_df, f"blended ({current_games}cur + {len(previous_rs)}prev)", current_games
+        return current_rs, f"current_only ({current_games}g, no prev)", current_games
+
+    if previous_rs is not None and len(previous_rs) >= 10:
+        return previous_rs, f"previous ({len(previous_rs)}g)", current_games
+    if current_games >= 5:
+        return current_rs, f"current_only ({current_games}g, low conf)", current_games
+    return None, "insufficient_data", current_games
+
+
+def analyze_wnba_player(player_name, espn_athlete_id, current_season_year, previous_season_year):
+    """
+    WNBA equivalent of analyze_player(), using ESPN game logs.
+
+    Returns the same dict schema as analyze_player() so all downstream pick-building
+    and CSV-saving code works unchanged.  Returns None if not enough data.
+    """
+    baseline_df, baseline_label, current_games = get_player_baseline_wnba(
+        espn_athlete_id, current_season_year, previous_season_year
+    )
+    if baseline_df is None:
+        return None
+
+    current_rs = _get_wnba_player_gamelog_espn(espn_athlete_id, current_season_year)
+
+    if current_rs is not None and len(current_rs) >= 3:
+        recent_df      = current_rs.tail(3)
+        recent_minutes = current_rs["MIN"].tail(3).mean()
+    else:
+        return None
+
+    baseline_minutes = baseline_df["MIN"].mean()
+
+    results = {
+        "player":        player_name,
+        "player_id":     int(espn_athlete_id),
+        "current_games": current_games,
+        "baseline_used": baseline_label,
+        "recent_mpg":    round(recent_minutes, 1),
+        "baseline_mpg":  round(baseline_minutes, 1),
+        "returning":     _check_returning(recent_df),
+    }
+
+    for stat in STATS_TO_CHECK:
+        if stat not in baseline_df.columns:
+            continue
+
+        season_avg = baseline_df[stat].mean()
+        season_std = baseline_df[stat].std()
+        recent_avg = recent_df[stat].mean()
+        z_score    = (recent_avg - season_avg) / season_std if season_std > 0 else 0
+
+        tier = classify_tier(z_score)
+        if z_score > 0 and tier != "NORMAL":
+            status = "HOT"
+        elif z_score < 0 and tier != "NORMAL":
+            status = "COLD"
+        else:
+            status = "NORMAL"
+
+        bet_rec = get_bet_recommendation(status, season_avg, season_std) if status != "NORMAL" else None
+
+        results[f"{stat}_baseline"] = round(season_avg, 2)
+        results[f"{stat}_std"]      = round(season_std, 2)
+        results[f"{stat}_recent"]   = round(recent_avg, 2)
+        results[f"{stat}_zscore"]   = round(z_score, 2)
+        results[f"{stat}_status"]   = status
+        results[f"{stat}_tier"]     = tier
+        results[f"{stat}_fair_line"] = round(season_avg, 2)
+        results[f"{stat}_bet_rec"]  = bet_rec
+
+    return results
+
+
+# ==============================================================================
 # GRADING (proxy backtest methodology + per-stat performance log)
 # ==============================================================================
 
@@ -847,6 +1133,12 @@ def run_for_league(league_name, league_id, current_season, previous_season, toda
     else:
         print(f"  Injury report: none available (API may be down)")
 
+    is_wnba     = (league_id == WNBA_LEAGUE_ID)
+    mpg_min     = WNBA_MIN_RECENT_MPG if is_wnba else MIN_RECENT_MPG
+    # WNBA season identifier is a plain year string ("2026"); NBA is "2025-26"
+    cur_season_id  = current_season
+    prev_season_id = previous_season
+
     all_picks = []
     out_skipped = 0
 
@@ -858,7 +1150,10 @@ def run_for_league(league_name, league_id, current_season, previous_season, toda
             print(f"     Game already started — showing rosters only, no new picks generated.")
             print(f"     Run tomorrow to grade results.")
             for team_id in [game["home_team_id"], game["away_team_id"]]:
-                roster = get_team_roster_safe(team_id, current_season)
+                if is_wnba:
+                    roster = _get_wnba_roster_espn(team_id)
+                else:
+                    roster = get_team_roster_safe(team_id, cur_season_id)
                 if not roster.empty:
                     names = ", ".join(roster["PLAYER_NAME"].head(6).tolist())
                     print(f"     Team {team_id}: {names}…")
@@ -866,23 +1161,34 @@ def run_for_league(league_name, league_id, current_season, previous_season, toda
 
         team_ids = [game["home_team_id"], game["away_team_id"]]
         for team_id in team_ids:
-            roster = get_team_roster_safe(team_id, current_season)
+            if is_wnba:
+                roster = _get_wnba_roster_espn(team_id)
+            else:
+                roster = get_team_roster_safe(team_id, cur_season_id)
 
             for _, player_row in roster.iterrows():
                 try:
-                    result = analyze_player(
-                        player_row["PLAYER_NAME"],
-                        player_row["PLAYER_ID"],
-                        current_season,
-                        previous_season
-                    )
+                    if is_wnba:
+                        result = analyze_wnba_player(
+                            player_row["PLAYER_NAME"],
+                            player_row["PLAYER_ID"],
+                            cur_season_id,
+                            prev_season_id,
+                        )
+                    else:
+                        result = analyze_player(
+                            player_row["PLAYER_NAME"],
+                            player_row["PLAYER_ID"],
+                            cur_season_id,
+                            prev_season_id,
+                        )
                 except Exception:
                     result = None
-                time.sleep(0.4)
+                time.sleep(0.3)
 
                 if not result:
                     continue
-                if result["recent_mpg"] < MIN_RECENT_MPG:
+                if result["recent_mpg"] < mpg_min:
                     continue
 
                 player_name = result["player"]
