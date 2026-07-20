@@ -548,6 +548,10 @@ def _get_wnba_player_gamelog_espn(espn_athlete_id, season_year):
     df["GAME_DATE"] = pd.to_datetime(df["GAME_DATE"], utc=True).dt.tz_convert(None)
     df["PRA"] = df["PTS"] + df["REB"] + df["AST"]
     df = df.sort_values("GAME_DATE").reset_index(drop=True)
+    # Exclude today's games — analysis must use only completed prior-day data
+    # so that in-progress or just-finished games don't inflate the rolling avg.
+    yesterday = pd.Timestamp(datetime.now().date() - timedelta(days=1))
+    df = df[df["GAME_DATE"] <= yesterday]
     return df[["GAME_DATE", "PTS", "REB", "AST", "FG3M", "MIN", "PRA"]]
 
 
