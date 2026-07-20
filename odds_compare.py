@@ -68,6 +68,62 @@ def parse_baseline_games(baseline_used):
     return int(m.group(1)) if m else 0
 
 
+def compute_wnba_record():
+    """
+    Compute WNBA model W-L from graded_predictions.csv (league == 'WNBA').
+    Returns {"wins": N, "losses": M}; zeroes if no graded WNBA picks yet.
+    """
+    graded_file = "graded_predictions.csv"
+    if not os.path.exists(graded_file):
+        return {"wins": 0, "losses": 0}
+    try:
+        df = pd.read_csv(graded_file)
+        if "league" not in df.columns or "result" not in df.columns:
+            return {"wins": 0, "losses": 0}
+        wnba = df[df["league"] == "WNBA"]
+        return {
+            "wins":   int((wnba["result"] == "WIN").sum()),
+            "losses": int((wnba["result"] == "LOSS").sum()),
+        }
+    except Exception:
+        return {"wins": 0, "losses": 0}
+
+
+def _build_wnba_picks_for_dash(wnba_today):
+    """
+    Convert today's WNBA rows from daily_predictions.csv into dashboard pick dicts.
+    No DraftKings lines — shows fair line and action threshold only.
+    """
+    picks = []
+    for _, row in wnba_today.iterrows():
+        direction      = "UNDER" if str(row["status"]) == "HOT" else "OVER"
+        thresh         = parse_threshold(str(row.get("bet_recommendation", "")))
+        baseline_games = parse_baseline_games(str(row.get("baseline_used", "")))
+        reg_prob = None
+        if "regression_probability" in row.index and pd.notna(row["regression_probability"]):
+            try:
+                reg_prob = round(float(row["regression_probability"]), 3)
+            except (ValueError, TypeError):
+                pass
+        picks.append({
+            "player":                 str(row["player"]),
+            "team":                   "WNBA",
+            "stat":                   str(row["stat"]),
+            "status":                 str(row["status"]),
+            "tier":                   str(row["tier"]),
+            "fair_line":              round(float(row["fair_line"]), 2),
+            "z_score":                round(float(row["z_score"]), 2),
+            "recent_avg":             round(float(row["recent_avg"]), 2),
+            "recent_mpg":             round(float(row["recent_mpg"]), 1),
+            "baseline_games":         baseline_games,
+            "direction":              direction,
+            "bet_recommendation":     str(row.get("bet_recommendation", "")),
+            "threshold":              thresh,
+            "regression_probability": reg_prob,
+        })
+    return picks
+
+
 # ==============================================================================
 # ESPN API — helpers
 # ==============================================================================
@@ -495,7 +551,8 @@ def print_edge_row(row):
 # DASHBOARD GENERATION
 # ==============================================================================
 
-def generate_dashboard(picks, game_info, date_str, model_record=None, all_injuries=None):
+def generate_dashboard(picks, game_info, date_str, model_record=None, all_injuries=None,
+                       wnba_picks=None, wnba_record=None):
     """
     Write dashboard.html and open it in the default browser.
 
@@ -506,13 +563,17 @@ def generate_dashboard(picks, game_info, date_str, model_record=None, all_injuri
     game_info    — dict with home_team/away_team/start_time_et/venue/
                    series_record/round_label
     date_str     — "2026-06-06"
-    model_record — {"wins": N, "losses": M} or None
+    model_record — {"wins": N, "losses": M} or None  (NBA record)
     all_injuries — list[{player, team, status, description}] for injury section
+    wnba_picks   — list of WNBA pick dicts (no DK lines; fair line + threshold only)
+    wnba_record  — {"wins": N, "losses": M}  (WNBA model record from CSV)
     """
-    picks_json    = json.dumps(picks,               ensure_ascii=False)
-    game_json     = json.dumps(game_info,           ensure_ascii=False)
-    record_json   = json.dumps(model_record,        ensure_ascii=False)
-    injuries_json = json.dumps(all_injuries or [],  ensure_ascii=False)
+    picks_json        = json.dumps(picks,                          ensure_ascii=False)
+    game_json         = json.dumps(game_info,                      ensure_ascii=False)
+    record_json       = json.dumps(model_record,                   ensure_ascii=False)
+    injuries_json     = json.dumps(all_injuries or [],             ensure_ascii=False)
+    wnba_picks_json   = json.dumps(wnba_picks  or [],              ensure_ascii=False)
+    wnba_record_json  = json.dumps(wnba_record or {"wins":0,"losses":0}, ensure_ascii=False)
     fixture       = f"{game_info.get('away_team','')} @ {game_info.get('home_team','')}"
     # Python-injected timestamp so it stays fixed even if the file is reopened later
     generated_at  = datetime.now().strftime("%b %d, %Y at %-I:%M %p")
@@ -957,6 +1018,12 @@ input[type=number]{width:82px}
   <!-- Picks -->
   <div id="picks-root"></div>
 
+  <!-- WNBA model record tracker (localStorage-based, seeds from CSV on first load) -->
+  <div id="wnba-rec-root"></div>
+
+  <!-- WNBA picks — fair line and action threshold; no DraftKings lines available -->
+  <div id="wnba-picks-root"></div>
+
   <!-- My bets record header (TRACKER 2 — computed from paper trading history) -->
   <div id="my-bets-rec-root"></div>
 
@@ -1019,6 +1086,8 @@ const GAME_INFO   = __GAME_JSON__;
 const MODEL_RECORD= __RECORD_JSON__;
 const INJURIES    = __INJURIES_JSON__;
 const STAT_PERF   = __STAT_PERF_JSON__;
+const WNBA_PICKS  = __WNBA_PICKS_JSON__;
+const WNBA_RECORD = __WNBA_RECORD_JSON__;
 
 // ── State (persisted in localStorage) ──────────────────────────────────────
 let state = {
@@ -1580,6 +1649,146 @@ function renderModelRecord() {
     </div>`;
 }
 
+// ── WNBA picks rendering ─────────────────────────────────────────────────────
+function wnbaPickCard(p) {
+  const isHot      = p.status === 'HOT';
+  const streakIcon = isHot ? '&#128293;' : '&#10052;&#65039;';
+  const dirCls     = isHot ? 'under' : 'over';
+  const dirLabel   = isHot ? 'BET UNDER' : 'BET OVER';
+
+  let regPillHtml = '';
+  if (p.regression_probability !== null && p.regression_probability !== undefined) {
+    const pct     = Math.round(p.regression_probability * 1000) / 10;
+    const pillCls = pct >= 70 ? 'reg-pill-high' : (pct >= 60 ? 'reg-pill-med' : 'reg-pill-low');
+    regPillHtml   = `<div class="reg-pill ${pillCls}">&#129302; v2 model: ${pct}% regression</div>`;
+  }
+
+  const threshTxt = p.threshold !== null && p.threshold !== undefined ? p.threshold : '&mdash;';
+  const zSign     = p.z_score >= 0 ? '+' : '';
+
+  return `
+<div class="pick ${isHot ? 'hot' : 'cold'}">
+  <div class="ptop">
+    <div class="pleft">
+      <span class="badge b-${p.tier}">${p.tier}</span>
+      <span class="spill">${esc(p.stat)}</span>
+      <span class="pname">${esc(p.player)}</span>
+    </div>
+    <div class="paction">
+      <span class="abtn ${dirCls}" style="cursor:default">${dirLabel}</span>
+    </div>
+  </div>
+  ${regPillHtml}
+  <div class="pmeta">
+    <span>WNBA</span>
+    <span>${streakIcon} ${isHot?'Hot':'Cold'} streak &middot; last 3 avg: ${p.recent_avg}</span>
+    <span>z = ${zSign}${p.z_score.toFixed(2)}</span>
+    <span>built from ${p.baseline_games}g &middot; ${p.recent_mpg} MPG</span>
+  </div>
+  <div class="pnums">
+    <div class="nc"><div class="nc-lbl">True avg</div><div class="nc-val">${p.fair_line}</div></div>
+    <div class="nc"><div class="nc-lbl">Last 3</div><div class="nc-val">${p.recent_avg}</div></div>
+    <div class="nc"><div class="nc-lbl">Z-score</div><div class="nc-val">${zSign}${p.z_score.toFixed(2)}</div></div>
+    <div class="nc"><div class="nc-lbl">Bet trigger</div><div class="nc-val thresh">${threshTxt}</div></div>
+  </div>
+</div>`;
+}
+
+function renderWnbaPicks() {
+  const root = document.getElementById('wnba-picks-root');
+  if (!root) return;
+  if (!WNBA_PICKS.length) { root.innerHTML = ''; return; }
+
+  const sorted = [...WNBA_PICKS].sort((a, b) => {
+    const td = TIER_ORDER[a.tier] - TIER_ORDER[b.tier];
+    if (td !== 0) return td;
+    return Math.abs(b.z_score) - Math.abs(a.z_score);
+  });
+
+  let html = `<div class="sec-hdr">WNBA picks &mdash; fair line &amp; action threshold (no DraftKings lines)</div>`;
+  for (const tier of ['STRONG', 'MODERATE', 'WEAK']) {
+    const tp = sorted.filter(p => p.tier === tier);
+    if (!tp.length) continue;
+    html += `<div class="sec-hdr" style="font-size:10px;margin-top:8px;margin-bottom:6px">${tier}</div>`;
+    tp.forEach(p => { html += wnbaPickCard(p); });
+  }
+  root.innerHTML = html;
+
+  // On WNBA-only days, suppress the confusing "No picks today." from the NBA section
+  if (!PICKS.length) {
+    const nbaRoot = document.getElementById('picks-root');
+    if (nbaRoot) nbaRoot.innerHTML = '';
+  }
+}
+
+// ── WNBA model record tracker (localStorage key: btr_wnba_model_record) ──────
+let wnbaModelRec = {wins: 0, losses: 0};
+
+function loadWnbaModelRecord() {
+  try {
+    const raw = localStorage.getItem('btr_wnba_model_record');
+    if (raw) {
+      wnbaModelRec = JSON.parse(raw);
+    } else if (WNBA_RECORD && (WNBA_RECORD.wins > 0 || WNBA_RECORD.losses > 0)) {
+      // Seed from Python-computed CSV record on first load
+      wnbaModelRec = {wins: WNBA_RECORD.wins, losses: WNBA_RECORD.losses};
+      localStorage.setItem('btr_wnba_model_record', JSON.stringify(wnbaModelRec));
+    }
+  } catch(e) {}
+}
+function saveWnbaModelRecord() {
+  localStorage.setItem('btr_wnba_model_record', JSON.stringify(wnbaModelRec));
+}
+function adjustWnbaModelRecord(field, delta) {
+  wnbaModelRec[field] = Math.max(0, (wnbaModelRec[field] || 0) + delta);
+  saveWnbaModelRecord();
+  renderWnbaModelRecord();
+}
+function resetWnbaModelRecord() {
+  if (!confirm('Reset WNBA record to 0–0?')) return;
+  wnbaModelRec = {wins: 0, losses: 0};
+  saveWnbaModelRecord();
+  renderWnbaModelRecord();
+}
+function renderWnbaModelRecord() {
+  const root = document.getElementById('wnba-rec-root');
+  if (!root) return;
+  if (!WNBA_PICKS.length && !wnbaModelRec.wins && !wnbaModelRec.losses) {
+    root.innerHTML = ''; return;
+  }
+  const total = wnbaModelRec.wins + wnbaModelRec.losses;
+  const wr    = total > 0 ? (100 * wnbaModelRec.wins / total) : null;
+  const wrTxt = wr !== null ? wr.toFixed(0)+'%' : '&mdash;';
+  const wrCls = wr !== null ? (wr >= 65 ? 'good' : wr >= 50 ? 'ok' : 'bad') : 'neutral';
+  root.innerHTML = `
+    <div class="sec-hdr">WNBA model record &mdash; STRONG + top MODERATE picks</div>
+    <div class="mrec-card">
+      <div class="mrec-row">
+        <div class="mrec-stat">
+          <div class="mrec-lbl">Wins</div>
+          <div class="mrec-ctrl">
+            <button class="mrec-btn" onclick="adjustWnbaModelRecord('wins',-1)">&minus;</button>
+            <span class="mrec-num pos">${wnbaModelRec.wins}</span>
+            <button class="mrec-btn" onclick="adjustWnbaModelRecord('wins',1)">+</button>
+          </div>
+        </div>
+        <div class="mrec-stat">
+          <div class="mrec-lbl">Losses</div>
+          <div class="mrec-ctrl">
+            <button class="mrec-btn" onclick="adjustWnbaModelRecord('losses',-1)">&minus;</button>
+            <span class="mrec-num neg">${wnbaModelRec.losses}</span>
+            <button class="mrec-btn" onclick="adjustWnbaModelRecord('losses',1)">+</button>
+          </div>
+        </div>
+        <div class="mrec-stat">
+          <div class="mrec-lbl">Win rate</div>
+          <div class="mrec-wr ${wrCls}">${wrTxt}</div>
+        </div>
+        <button class="act" onclick="resetWnbaModelRecord()" style="margin-left:auto;font-size:11px;padding:4px 10px">Reset</button>
+      </div>
+    </div>`;
+}
+
 // ── My bets record header (TRACKER 2 — computed from paper trading history) ──
 function renderMyBetsRecord() {
   const root = document.getElementById('my-bets-rec-root');
@@ -1754,12 +1963,15 @@ function clearPicksLog() {
 // ── Init ─────────────────────────────────────────────────────────────────────
 loadState();
 loadModelRecord();
+loadWnbaModelRecord();
 renderInjuries();
 renderStatPerf();
 renderPicks();
 buildDropdown();
 renderAll();
 renderModelRecord();
+renderWnbaModelRecord();
+renderWnbaPicks();
 logPicksToday();
 renderPicksLog();
 </script>
@@ -1768,14 +1980,16 @@ renderPicksLog();
 """
 
     # Inject Python-computed values into the template
-    html = html.replace("__PICKS_JSON__",     picks_json)
-    html = html.replace("__GAME_JSON__",      game_json)
-    html = html.replace("__RECORD_JSON__",    record_json)
-    html = html.replace("__INJURIES_JSON__",  injuries_json)
-    html = html.replace("__STAT_PERF_JSON__", stat_perf_json)
-    html = html.replace("__DATE__",           date_str)
-    html = html.replace("__FIXTURE__",        fixture)
-    html = html.replace("__GENERATED_AT__",   generated_at)
+    html = html.replace("__PICKS_JSON__",       picks_json)
+    html = html.replace("__GAME_JSON__",        game_json)
+    html = html.replace("__RECORD_JSON__",      record_json)
+    html = html.replace("__INJURIES_JSON__",    injuries_json)
+    html = html.replace("__STAT_PERF_JSON__",   stat_perf_json)
+    html = html.replace("__WNBA_PICKS_JSON__",  wnba_picks_json)
+    html = html.replace("__WNBA_RECORD_JSON__", wnba_record_json)
+    html = html.replace("__DATE__",             date_str)
+    html = html.replace("__FIXTURE__",          fixture)
+    html = html.replace("__GENERATED_AT__",     generated_at)
 
     with open(DASHBOARD_FILE, "w", encoding="utf-8") as fh:
         fh.write(html)
@@ -1816,28 +2030,37 @@ def main():
     print(f"{'#'*70}")
 
     # ------------------------------------------------------------------
-    # 1. Load today's NBA predictions (scan back up to 7 days if needed)
+    # 1. Load today's predictions — NBA and WNBA separately
     # ------------------------------------------------------------------
     if not os.path.exists(PREDICTIONS_FILE):
         print(f"\n❌  {PREDICTIONS_FILE} not found. Run daily_picks.py first.")
         sys.exit(1)
 
-    all_preds = pd.read_csv(PREDICTIONS_FILE)
-    nba_preds = all_preds[all_preds["league"] == "NBA"].copy()
+    all_preds  = pd.read_csv(PREDICTIONS_FILE)
+    nba_preds  = all_preds[all_preds["league"] == "NBA"].copy()
+    wnba_preds = all_preds[all_preds["league"] == "WNBA"].copy()
 
-    pred_date = TODAY
-    preds = nba_preds[nba_preds["date"].astype(str) == pred_date].copy()
+    pred_date  = TODAY
+    preds      = nba_preds[nba_preds["date"].astype(str)   == pred_date].copy()
+    wnba_today = wnba_preds[wnba_preds["date"].astype(str) == pred_date].copy()
 
-    if preds.empty:
+    has_nba  = not preds.empty
+    has_wnba = not wnba_today.empty
+
+    if not has_nba and not has_wnba:
         # Scan back to tell the user what IS available, then exit loudly.
         # Do NOT silently show stale picks — wrong game, wrong date, wrong picks.
         for days_back in range(1, 8):
-            candidate = (datetime.now() - timedelta(days=days_back)).strftime("%Y-%m-%d")
-            stale = nba_preds[nba_preds["date"].astype(str) == candidate]
-            if not stale.empty:
+            candidate  = (datetime.now() - timedelta(days=days_back)).strftime("%Y-%m-%d")
+            stale_nba  = nba_preds[nba_preds["date"].astype(str)   == candidate]
+            stale_wnba = wnba_preds[wnba_preds["date"].astype(str) == candidate]
+            if not stale_nba.empty or not stale_wnba.empty:
+                parts = []
+                if not stale_nba.empty:  parts.append(f"{len(stale_nba)} NBA picks")
+                if not stale_wnba.empty: parts.append(f"{len(stale_wnba)} WNBA picks")
                 print(f"\n{'!'*70}")
                 print(f"  ❌  NO PICKS FOR TODAY ({TODAY})")
-                print(f"  Most recent picks are from {candidate} ({len(stale)} picks).")
+                print(f"  Most recent picks are from {candidate} ({', '.join(parts)}).")
                 print(f"  Showing stale data would display the wrong game and wrong picks.")
                 print(f"{'!'*70}")
                 print(f"\n  Run:  python3.12 daily_picks.py")
@@ -1845,16 +2068,46 @@ def main():
                 sys.exit(1)
 
         print(f"\n{'!'*70}")
-        print(f"  ❌  NO NBA PREDICTIONS FOUND (checked last 7 days)")
+        print(f"  ❌  NO PREDICTIONS FOUND (checked last 7 days)")
         print(f"{'!'*70}")
         print(f"\n  Run:  python3.12 daily_picks.py")
         print(f"  Then re-run:  python3.12 odds_compare.py\n")
         sys.exit(1)
 
-    print(f"\n  Loaded {len(preds)} NBA prediction(s) for {pred_date}:")
-    for _, r in preds.iterrows():
-        print(f"    {r['player']:22} {r['stat']:5} {r['status']:5} [{r['tier']}]  "
-              f"fair={r['fair_line']}  z={r['z_score']}")
+    if has_nba:
+        print(f"\n  Loaded {len(preds)} NBA prediction(s) for {pred_date}:")
+        for _, r in preds.iterrows():
+            print(f"    {r['player']:22} {r['stat']:5} {r['status']:5} [{r['tier']}]  "
+                  f"fair={r['fair_line']}  z={r['z_score']}")
+    if has_wnba:
+        print(f"\n  Loaded {len(wnba_today)} WNBA prediction(s) for {pred_date}.")
+
+    # ------------------------------------------------------------------
+    # WNBA-only path — skip all NBA-specific ESPN endpoints and return early
+    # ------------------------------------------------------------------
+    if not has_nba:
+        wnba_picks_for_dash = _build_wnba_picks_for_dash(wnba_today)
+        wnba_record         = compute_wnba_record()
+        model_record = None
+        if os.path.exists(PERFORMANCE_FILE):
+            try:
+                perf = pd.read_csv(PERFORMANCE_FILE)
+                if not perf.empty:
+                    last   = perf.iloc[-1]
+                    wins   = int(last.get("cumulative_wins",   last.get("wins",   0)))
+                    losses = int(last.get("cumulative_losses", last.get("losses", 0)))
+                    model_record = {"wins": wins, "losses": losses}
+            except Exception:
+                pass
+        game_info = {
+            "home_team": "", "away_team": "",
+            "start_time_et": "", "venue": "",
+            "series_record": "", "round_label": "WNBA 2026",
+        }
+        generate_dashboard([], game_info, pred_date, model_record,
+                           all_injuries=[], wnba_picks=wnba_picks_for_dash,
+                           wnba_record=wnba_record)
+        return
 
     # ------------------------------------------------------------------
     # 2. Find the relevant NBA event on ESPN
@@ -2109,8 +2362,12 @@ def main():
     # ------------------------------------------------------------------
     # 13. Generate dashboard & open browser
     # ------------------------------------------------------------------
+    wnba_picks_for_dash = _build_wnba_picks_for_dash(wnba_today) if has_wnba else []
+    wnba_record         = compute_wnba_record()
+
     generate_dashboard(picks_for_dash, game_info, pred_date, model_record,
-                       all_injuries=all_injuries)
+                       all_injuries=all_injuries,
+                       wnba_picks=wnba_picks_for_dash, wnba_record=wnba_record)
 
 
 if __name__ == "__main__":

@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Betting the Regression &mdash; 2026-06-08</title>
+<title>Betting the Regression &mdash; 2026-07-19</title>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js" crossorigin="anonymous"></script>
 <style>
 :root {
@@ -315,6 +315,25 @@ input[type=number]{width:82px}
   .ls-warn{color:#fde68a;background:#292000;border-color:#5c4600}
 }
 
+/* ── Picks log ── */
+.plog{background:var(--bg-card);border:1px solid var(--border);
+      border-radius:var(--r-lg);padding:14px 18px;margin-top:28px}
+.plog-hdr{display:flex;justify-content:space-between;align-items:center;
+          margin-bottom:10px;cursor:pointer;user-select:none}
+.plog-title{font-size:15px;font-weight:800}
+.plog-toggle{font-size:12px;color:var(--text-2)}
+.plog-tbl{width:100%;border-collapse:collapse;font-size:12px}
+.plog-tbl th{font-size:10px;text-transform:uppercase;letter-spacing:.4px;
+             color:var(--text-2);text-align:left;padding:5px 8px;
+             border-bottom:2px solid var(--border)}
+.plog-tbl td{padding:7px 8px;border-bottom:1px solid var(--border);vertical-align:middle}
+.plog-tbl tr:last-child td{border-bottom:none}
+.plog-date{color:var(--text-3);white-space:nowrap}
+.plog-empty{text-align:center;color:var(--text-3);padding:20px;font-size:13px}
+.plog-clr{font-size:11px;color:var(--bet-under);cursor:pointer;
+          background:none;border:none;font-family:inherit;padding:0}
+.plog-clr:hover{text-decoration:underline}
+
 /* ── Print layout (Cmd+P) — picks only, no paper trading ── */
 @media print {
   .paper, .how, .arow, .bform, #hist-sec, .chart-wrap { display: none !important; }
@@ -343,14 +362,14 @@ input[type=number]{width:82px}
          style="font-size:11px;color:var(--text-2);text-decoration:none;white-space:nowrap"
          onmouseover="this.style.textDecoration='underline'"
          onmouseout="this.style.textDecoration='none'">&#128202; DataBallR</a>
-      <span class="hdate">2026-06-08</span>
+      <span class="hdate">2026-07-19</span>
       <button class="snap-btn" onclick="saveSnapshot()"
         style="font-size:11px;padding:3px 10px;border:1px solid var(--border);
                border-radius:5px;background:var(--bg-raised);color:var(--text-2);
                cursor:pointer;font-family:inherit">&#128190; Save snapshot</button>
     </div>
   </div>
-  <p class="sub">Lines from DraftKings via ESPN &middot; no auth required &middot; Generated Jun 10, 2026 at 11:58 PM</p>
+  <p class="sub">Lines from DraftKings via ESPN &middot; no auth required &middot; Generated Jul 19, 2026 at 11:44 PM</p>
 
   <!-- How it works -->
   <div class="how">
@@ -369,7 +388,7 @@ input[type=number]{width:82px}
 
   <!-- Game strip -->
   <div class="game">
-    <div class="gteams">San Antonio Spurs @ New York Knicks</div>
+    <div class="gteams"> @ </div>
     <div class="gmeta">
       <span id="g-time"></span>
       <span id="g-venue"></span>
@@ -398,8 +417,17 @@ input[type=number]{width:82px}
   <!-- Picks -->
   <div id="picks-root"></div>
 
+  <!-- WNBA model record tracker (localStorage-based, seeds from CSV on first load) -->
+  <div id="wnba-rec-root"></div>
+
+  <!-- WNBA picks — fair line and action threshold; no DraftKings lines available -->
+  <div id="wnba-picks-root"></div>
+
   <!-- My bets record header (TRACKER 2 — computed from paper trading history) -->
   <div id="my-bets-rec-root"></div>
+
+  <!-- Picks log — persisted in localStorage, STRONG + MODERATE only -->
+  <div class="plog" id="picks-log-root"></div>
 
   <!-- Paper trading -->
   <div class="paper">
@@ -452,11 +480,13 @@ input[type=number]{width:82px}
 
 <script>
 // ── Data injected by Python ─────────────────────────────────────────────────
-const PICKS       = [{"player": "De'Aaron Fox", "team": "San Antonio Spurs", "stat": "PRA", "status": "COLD", "tier": "STRONG", "fair_line": 34.66, "dk_line": 23.5, "gap": 11.16, "z_score": -1.42, "bet_recommendation": "bet OVER if line < 30.0", "recent_avg": 21.33, "recent_mpg": 36.0, "baseline_games": 62, "threshold": 30.0, "threshold_met": true, "direction": "OVER", "injury_flag": "", "injury_desc": "", "regression_probability": null}, {"player": "De'Aaron Fox", "team": "San Antonio Spurs", "stat": "PTS", "status": "COLD", "tier": "MODERATE", "fair_line": 23.53, "dk_line": 14.5, "gap": 9.03, "z_score": -1.12, "bet_recommendation": "bet OVER if line < 19.3", "recent_avg": 14.0, "recent_mpg": 36.0, "baseline_games": 62, "threshold": 19.3, "threshold_met": true, "direction": "OVER", "injury_flag": "", "injury_desc": "", "regression_probability": null}, {"player": "Julian Champagnie", "team": "San Antonio Spurs", "stat": "FG3M", "status": "HOT", "tier": "MODERATE", "fair_line": 2.65, "dk_line": 2.5, "gap": -0.15, "z_score": 1.05, "bet_recommendation": "bet UNDER if line > 3.4", "recent_avg": 4.33, "recent_mpg": 35.0, "baseline_games": 20, "threshold": 3.4, "threshold_met": false, "direction": "UNDER", "injury_flag": "", "injury_desc": "", "regression_probability": null}, {"player": "Landry Shamet", "team": "New York Knicks", "stat": "PTS", "status": "HOT", "tier": "WEAK", "fair_line": 6.62, "dk_line": 8.5, "gap": 1.88, "z_score": 1.18, "bet_recommendation": "bet UNDER if line > 9.8", "recent_avg": 14.0, "recent_mpg": 27.3, "baseline_games": 16, "threshold": 9.8, "threshold_met": false, "direction": "UNDER", "injury_flag": "", "injury_desc": "", "regression_probability": null}, {"player": "Landry Shamet", "team": "New York Knicks", "stat": "PRA", "status": "HOT", "tier": "WEAK", "fair_line": 8.19, "dk_line": 11.5, "gap": 3.31, "z_score": 1.16, "bet_recommendation": "bet UNDER if line > 11.7", "recent_avg": 16.33, "recent_mpg": 27.3, "baseline_games": 16, "threshold": 11.7, "threshold_met": false, "direction": "UNDER", "injury_flag": "", "injury_desc": "", "regression_probability": null}, {"player": "Josh Hart", "team": "New York Knicks", "stat": "PTS", "status": "COLD", "tier": "WEAK", "fair_line": 10.19, "dk_line": 9.5, "gap": 0.69, "z_score": -1.12, "bet_recommendation": "bet OVER if line < 7.0", "recent_avg": 3.0, "recent_mpg": 23.0, "baseline_games": 16, "threshold": 7.0, "threshold_met": false, "direction": "OVER", "injury_flag": "", "injury_desc": "", "regression_probability": null}, {"player": "Landry Shamet", "team": "New York Knicks", "stat": "FG3M", "status": "HOT", "tier": "WEAK", "fair_line": 1.69, "dk_line": 1.5, "gap": -0.19, "z_score": 1.04, "bet_recommendation": "bet UNDER if line > 2.5", "recent_avg": 3.33, "recent_mpg": 27.3, "baseline_games": 16, "threshold": 2.5, "threshold_met": false, "direction": "UNDER", "injury_flag": "", "injury_desc": "", "regression_probability": null}];
-const GAME_INFO   = {"home_team": "New York Knicks", "away_team": "San Antonio Spurs", "start_time_et": "8:30 PM ET", "venue": "Madison Square Garden, New York", "series_record": "NBA Finals - Game 3", "round_label": "NBA Finals"};
-const MODEL_RECORD= null;
-const INJURIES    = [{"player": "David Jones Garcia", "team": "San Antonio Spurs", "status": "OUT", "description": "Right Ankle Surgery"}];
-const STAT_PERF   = {};
+const PICKS       = [];
+const GAME_INFO   = {"home_team": "", "away_team": "", "start_time_et": "", "venue": "", "series_record": "", "round_label": "WNBA 2026"};
+const MODEL_RECORD= {"wins": 6, "losses": 4};
+const INJURIES    = [];
+const STAT_PERF   = {"FG3M": {"wins": 6, "losses": 0, "win_rate": 100.0}, "PTS": {"wins": 3, "losses": 3, "win_rate": 50.0}, "PRA": {"wins": 0, "losses": 3, "win_rate": 0.0}};
+const WNBA_PICKS  = [{"player": "Shakira Austin", "team": "WNBA", "stat": "PTS", "status": "HOT", "tier": "MODERATE", "fair_line": 14.36, "z_score": 1.14, "recent_avg": 21.0, "recent_mpg": 31.3, "baseline_games": 22, "direction": "UNDER", "bet_recommendation": "bet UNDER if line > 17.3", "threshold": 17.3, "regression_probability": 0.282}, {"player": "Cotie McMahon", "team": "WNBA", "stat": "PTS", "status": "COLD", "tier": "MODERATE", "fair_line": 6.43, "z_score": -1.1, "recent_avg": 2.33, "recent_mpg": 14.3, "baseline_games": 23, "direction": "OVER", "bet_recommendation": "bet OVER if line < 4.6", "threshold": 4.6, "regression_probability": 0.531}, {"player": "Gabby Williams", "team": "WNBA", "stat": "PRA", "status": "COLD", "tier": "WEAK", "fair_line": 20.58, "z_score": -1.07, "recent_avg": 11.67, "recent_mpg": 20.7, "baseline_games": 24, "direction": "OVER", "bet_recommendation": "bet OVER if line < 16.4", "threshold": 16.4, "regression_probability": 0.237}, {"player": "Gabby Williams", "team": "WNBA", "stat": "PTS", "status": "COLD", "tier": "WEAK", "fair_line": 15.0, "z_score": -0.95, "recent_avg": 8.33, "recent_mpg": 20.7, "baseline_games": 24, "direction": "OVER", "bet_recommendation": "bet OVER if line < 11.5", "threshold": 11.5, "regression_probability": 0.237}, {"player": "Kaitlyn Chen", "team": "WNBA", "stat": "PTS", "status": "HOT", "tier": "WEAK", "fair_line": 7.62, "z_score": 0.9, "recent_avg": 12.67, "recent_mpg": 17.7, "baseline_games": 26, "direction": "UNDER", "bet_recommendation": "bet UNDER if line > 10.4", "threshold": 10.4, "regression_probability": 0.282}, {"player": "Janelle Salaun", "team": "WNBA", "stat": "PTS", "status": "HOT", "tier": "WEAK", "fair_line": 13.0, "z_score": 0.85, "recent_avg": 18.0, "recent_mpg": 24.0, "baseline_games": 25, "direction": "UNDER", "bet_recommendation": "bet UNDER if line > 15.9", "threshold": 15.9, "regression_probability": 0.269}];
+const WNBA_RECORD = {"wins": 0, "losses": 0};
 
 // ── State (persisted in localStorage) ──────────────────────────────────────
 let state = {
@@ -947,7 +977,7 @@ function renderAll() {
 function saveSnapshot() {
   // Capture the full current page (including paper bets in localStorage state)
   // and download it as a self-contained HTML file named by today's date.
-  const dateTag = '2026-06-08'.replace(/-/g, '');
+  const dateTag = '2026-07-19'.replace(/-/g, '');
   const fname   = 'dashboard_snapshot_' + dateTag + '.html';
   const blob    = new Blob([document.documentElement.outerHTML], {type: 'text/html'});
   const a       = document.createElement('a');
@@ -1018,6 +1048,146 @@ function renderModelRecord() {
     </div>`;
 }
 
+// ── WNBA picks rendering ─────────────────────────────────────────────────────
+function wnbaPickCard(p) {
+  const isHot      = p.status === 'HOT';
+  const streakIcon = isHot ? '&#128293;' : '&#10052;&#65039;';
+  const dirCls     = isHot ? 'under' : 'over';
+  const dirLabel   = isHot ? 'BET UNDER' : 'BET OVER';
+
+  let regPillHtml = '';
+  if (p.regression_probability !== null && p.regression_probability !== undefined) {
+    const pct     = Math.round(p.regression_probability * 1000) / 10;
+    const pillCls = pct >= 70 ? 'reg-pill-high' : (pct >= 60 ? 'reg-pill-med' : 'reg-pill-low');
+    regPillHtml   = `<div class="reg-pill ${pillCls}">&#129302; v2 model: ${pct}% regression</div>`;
+  }
+
+  const threshTxt = p.threshold !== null && p.threshold !== undefined ? p.threshold : '&mdash;';
+  const zSign     = p.z_score >= 0 ? '+' : '';
+
+  return `
+<div class="pick ${isHot ? 'hot' : 'cold'}">
+  <div class="ptop">
+    <div class="pleft">
+      <span class="badge b-${p.tier}">${p.tier}</span>
+      <span class="spill">${esc(p.stat)}</span>
+      <span class="pname">${esc(p.player)}</span>
+    </div>
+    <div class="paction">
+      <span class="abtn ${dirCls}" style="cursor:default">${dirLabel}</span>
+    </div>
+  </div>
+  ${regPillHtml}
+  <div class="pmeta">
+    <span>WNBA</span>
+    <span>${streakIcon} ${isHot?'Hot':'Cold'} streak &middot; last 3 avg: ${p.recent_avg}</span>
+    <span>z = ${zSign}${p.z_score.toFixed(2)}</span>
+    <span>built from ${p.baseline_games}g &middot; ${p.recent_mpg} MPG</span>
+  </div>
+  <div class="pnums">
+    <div class="nc"><div class="nc-lbl">True avg</div><div class="nc-val">${p.fair_line}</div></div>
+    <div class="nc"><div class="nc-lbl">Last 3</div><div class="nc-val">${p.recent_avg}</div></div>
+    <div class="nc"><div class="nc-lbl">Z-score</div><div class="nc-val">${zSign}${p.z_score.toFixed(2)}</div></div>
+    <div class="nc"><div class="nc-lbl">Bet trigger</div><div class="nc-val thresh">${threshTxt}</div></div>
+  </div>
+</div>`;
+}
+
+function renderWnbaPicks() {
+  const root = document.getElementById('wnba-picks-root');
+  if (!root) return;
+  if (!WNBA_PICKS.length) { root.innerHTML = ''; return; }
+
+  const sorted = [...WNBA_PICKS].sort((a, b) => {
+    const td = TIER_ORDER[a.tier] - TIER_ORDER[b.tier];
+    if (td !== 0) return td;
+    return Math.abs(b.z_score) - Math.abs(a.z_score);
+  });
+
+  let html = `<div class="sec-hdr">WNBA picks &mdash; fair line &amp; action threshold (no DraftKings lines)</div>`;
+  for (const tier of ['STRONG', 'MODERATE', 'WEAK']) {
+    const tp = sorted.filter(p => p.tier === tier);
+    if (!tp.length) continue;
+    html += `<div class="sec-hdr" style="font-size:10px;margin-top:8px;margin-bottom:6px">${tier}</div>`;
+    tp.forEach(p => { html += wnbaPickCard(p); });
+  }
+  root.innerHTML = html;
+
+  // On WNBA-only days, suppress the confusing "No picks today." from the NBA section
+  if (!PICKS.length) {
+    const nbaRoot = document.getElementById('picks-root');
+    if (nbaRoot) nbaRoot.innerHTML = '';
+  }
+}
+
+// ── WNBA model record tracker (localStorage key: btr_wnba_model_record) ──────
+let wnbaModelRec = {wins: 0, losses: 0};
+
+function loadWnbaModelRecord() {
+  try {
+    const raw = localStorage.getItem('btr_wnba_model_record');
+    if (raw) {
+      wnbaModelRec = JSON.parse(raw);
+    } else if (WNBA_RECORD && (WNBA_RECORD.wins > 0 || WNBA_RECORD.losses > 0)) {
+      // Seed from Python-computed CSV record on first load
+      wnbaModelRec = {wins: WNBA_RECORD.wins, losses: WNBA_RECORD.losses};
+      localStorage.setItem('btr_wnba_model_record', JSON.stringify(wnbaModelRec));
+    }
+  } catch(e) {}
+}
+function saveWnbaModelRecord() {
+  localStorage.setItem('btr_wnba_model_record', JSON.stringify(wnbaModelRec));
+}
+function adjustWnbaModelRecord(field, delta) {
+  wnbaModelRec[field] = Math.max(0, (wnbaModelRec[field] || 0) + delta);
+  saveWnbaModelRecord();
+  renderWnbaModelRecord();
+}
+function resetWnbaModelRecord() {
+  if (!confirm('Reset WNBA record to 0–0?')) return;
+  wnbaModelRec = {wins: 0, losses: 0};
+  saveWnbaModelRecord();
+  renderWnbaModelRecord();
+}
+function renderWnbaModelRecord() {
+  const root = document.getElementById('wnba-rec-root');
+  if (!root) return;
+  if (!WNBA_PICKS.length && !wnbaModelRec.wins && !wnbaModelRec.losses) {
+    root.innerHTML = ''; return;
+  }
+  const total = wnbaModelRec.wins + wnbaModelRec.losses;
+  const wr    = total > 0 ? (100 * wnbaModelRec.wins / total) : null;
+  const wrTxt = wr !== null ? wr.toFixed(0)+'%' : '&mdash;';
+  const wrCls = wr !== null ? (wr >= 65 ? 'good' : wr >= 50 ? 'ok' : 'bad') : 'neutral';
+  root.innerHTML = `
+    <div class="sec-hdr">WNBA model record &mdash; STRONG + top MODERATE picks</div>
+    <div class="mrec-card">
+      <div class="mrec-row">
+        <div class="mrec-stat">
+          <div class="mrec-lbl">Wins</div>
+          <div class="mrec-ctrl">
+            <button class="mrec-btn" onclick="adjustWnbaModelRecord('wins',-1)">&minus;</button>
+            <span class="mrec-num pos">${wnbaModelRec.wins}</span>
+            <button class="mrec-btn" onclick="adjustWnbaModelRecord('wins',1)">+</button>
+          </div>
+        </div>
+        <div class="mrec-stat">
+          <div class="mrec-lbl">Losses</div>
+          <div class="mrec-ctrl">
+            <button class="mrec-btn" onclick="adjustWnbaModelRecord('losses',-1)">&minus;</button>
+            <span class="mrec-num neg">${wnbaModelRec.losses}</span>
+            <button class="mrec-btn" onclick="adjustWnbaModelRecord('losses',1)">+</button>
+          </div>
+        </div>
+        <div class="mrec-stat">
+          <div class="mrec-lbl">Win rate</div>
+          <div class="mrec-wr ${wrCls}">${wrTxt}</div>
+        </div>
+        <button class="act" onclick="resetWnbaModelRecord()" style="margin-left:auto;font-size:11px;padding:4px 10px">Reset</button>
+      </div>
+    </div>`;
+}
+
 // ── My bets record header (TRACKER 2 — computed from paper trading history) ──
 function renderMyBetsRecord() {
   const root = document.getElementById('my-bets-rec-root');
@@ -1058,22 +1228,151 @@ function exportBetsCSV() {
   const blob = new Blob([csv], {type:'text/csv'});
   const a    = document.createElement('a');
   a.href     = URL.createObjectURL(blob);
-  a.download = 'bets_export_2026-06-08.csv';
+  a.download = 'bets_export_2026-07-19.csv';
   document.body.appendChild(a);
   a.click();
   document.body.removeChild(a);
   URL.revokeObjectURL(a.href);
 }
 
+// ── Picks log (STRONG + MODERATE, persisted in localStorage, 90-day TTL) ─────
+// Storage: btr_picks_log → [{date, player, stat, dir, tier, dk_line, gap, z_score}]
+// One entry per player+stat+date combo. Auto-purges entries older than 90 days.
+
+const PLOG_KEY     = 'btr_picks_log';
+const PLOG_MAX_DAYS = 90;
+
+function plogLoad() {
+  try {
+    const raw = localStorage.getItem(PLOG_KEY);
+    return raw ? JSON.parse(raw) : [];
+  } catch(e) { return []; }
+}
+
+function plogSave(log) {
+  try { localStorage.setItem(PLOG_KEY, JSON.stringify(log)); } catch(e) {}
+}
+
+function logPicksToday() {
+  // Pull today's STRONG + MODERATE picks from the injected PICKS constant
+  const today = '2026-07-19';
+  const notable = PICKS.filter(p => p.tier === 'STRONG' || p.tier === 'MODERATE');
+  if (!notable.length) return;
+
+  let log = plogLoad();
+
+  // Purge entries older than 90 days
+  const cutoff = new Date();
+  cutoff.setDate(cutoff.getDate() - PLOG_MAX_DAYS);
+  const cutoffStr = cutoff.toISOString().slice(0, 10);
+  log = log.filter(e => e.date >= cutoffStr);
+
+  // Add today's picks (deduplicate by date+player+stat)
+  const existing = new Set(log.filter(e => e.date === today).map(e => e.player+'|'+e.stat));
+  for (const p of notable) {
+    const key = p.player + '|' + p.stat;
+    if (!existing.has(key)) {
+      log.push({
+        date:     today,
+        player:   p.player,
+        team:     p.team,
+        stat:     p.stat,
+        dir:      p.direction,
+        tier:     p.tier,
+        dk_line:  p.dk_line,
+        gap:      p.gap,
+        z_score:  p.z_score,
+      });
+      existing.add(key);
+    }
+  }
+
+  plogSave(log);
+}
+
+function renderPicksLog() {
+  const root = document.getElementById('picks-log-root');
+  if (!root) return;
+
+  const log = plogLoad();
+  if (!log.length) {
+    root.innerHTML = `
+      <div class="plog-hdr">
+        <span class="plog-title">Picks log</span>
+        <span class="plog-toggle" style="color:var(--text-3)">No entries yet — runs nightly</span>
+      </div>`;
+    return;
+  }
+
+  // Sort most-recent first
+  const sorted = [...log].sort((a,b) => b.date.localeCompare(a.date));
+  const collapsed = JSON.parse(localStorage.getItem('btr_plog_collapsed') || 'false');
+
+  const rows = sorted.map(e => {
+    const dirCls = e.dir === 'UNDER' ? 'color:var(--bet-under)' : 'color:var(--bet-over)';
+    const tierBadge = `<span class="badge b-${esc(e.tier)}">${esc(e.tier)}</span>`;
+    const gapSign   = e.gap > 0 ? '+' : '';
+    return `<tr>
+      <td class="plog-date">${esc(e.date)}</td>
+      <td><strong>${esc(e.player)}</strong> <span style="color:var(--text-3);font-size:11px">${esc(e.team)}</span></td>
+      <td><span class="spill">${esc(e.stat)}</span></td>
+      <td>${tierBadge}</td>
+      <td style="${dirCls};font-weight:700">${esc(e.dir)}</td>
+      <td style="text-align:right">${e.dk_line}</td>
+      <td style="text-align:right">${gapSign}${e.gap}</td>
+      <td style="text-align:right;color:var(--text-2)">${e.z_score}</td>
+    </tr>`;
+  }).join('');
+
+  root.innerHTML = `
+    <div class="plog-hdr" onclick="togglePicksLog()">
+      <span class="plog-title">Picks log <span style="font-size:12px;font-weight:400;color:var(--text-2)">${log.length} entries</span></span>
+      <div style="display:flex;gap:12px;align-items:center">
+        <button class="plog-clr" onclick="event.stopPropagation();clearPicksLog()">Clear log</button>
+        <span class="plog-toggle">${collapsed ? '&#9660; Show' : '&#9650; Hide'}</span>
+      </div>
+    </div>
+    <div id="plog-body" style="display:${collapsed ? 'none' : 'block'}">
+      <table class="plog-tbl">
+        <thead><tr>
+          <th>Date</th><th>Player</th><th>Stat</th><th>Tier</th>
+          <th>Dir</th><th style="text-align:right">DK Line</th>
+          <th style="text-align:right">Gap</th><th style="text-align:right">Z</th>
+        </tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>`;
+}
+
+function togglePicksLog() {
+  const body = document.getElementById('plog-body');
+  if (!body) return;
+  const collapsed = body.style.display === 'none';
+  body.style.display = collapsed ? 'block' : 'none';
+  localStorage.setItem('btr_plog_collapsed', JSON.stringify(!collapsed));
+  renderPicksLog();
+}
+
+function clearPicksLog() {
+  if (!confirm('Clear entire picks log? This cannot be undone.')) return;
+  localStorage.removeItem(PLOG_KEY);
+  renderPicksLog();
+}
+
 // ── Init ─────────────────────────────────────────────────────────────────────
 loadState();
 loadModelRecord();
+loadWnbaModelRecord();
 renderInjuries();
 renderStatPerf();
 renderPicks();
 buildDropdown();
 renderAll();
 renderModelRecord();
+renderWnbaModelRecord();
+renderWnbaPicks();
+logPicksToday();
+renderPicksLog();
 </script>
 </body>
 </html>
